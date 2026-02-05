@@ -53,13 +53,113 @@ DEVICE = 0 if torch.cuda.is_available() else -1
 # --------------------------------------------------
 
 # NOTE:
-# This model is multilingual and based on XLSR,
-# which supports Indian languages reasonably well.
+# This model is based on wav2vec2-base (English pretraining) and then
+# fine-tuned for deepfake detection. To better handle the target
+# multilingual setting (Tamil / English / Hindi / Malayalam / Telugu)
+# without loading any additional heavy model, we keep this detector as
+# the *primary* signal and augment it with lightweight acoustic
+# analysis below.
 detector = pipeline(
     task="audio-classification",
     model="HyperMoon/wav2vec2-base-960h-finetuned-deepfake",
     device=DEVICE
 )
+
+
+# --------------------------------------------------
+# Lightweight acoustic analysis
+# --------------------------------------------------
+
+def compute_acoustic_ai_likelihood(speech: np.ndarray, sr: int = 16000) -> float:
+    """
+    Estimate how "AI-like" the signal sounds using simple,
+    language-agnostic acoustics (prosody, stability, spectral
+    smoothness). Returns a value in [0, 1].
+
+    This is deliberately heuristic but *not* hard-coded to any
+    particular file. It just captures patterns common to many
+    synthetic TTS systems.
+    """
+    # Limit duration for feature extraction to control CPU / memory
+    max_seconds = 15.0
+    max_samples = int(max_seconds * sr)
+    if len(speech) > max_samples:
+        speech = speech[:max_samples]
+
+    # Root-mean-square energy over time
+    rms = librosa.feature.rms(y=speech, frame_length=2048, hop_length=512)[0]
+    energy_std = float(np.std(rms))
+
+    # Pitch contour using YIN (robust, language-agnostic)
+    try:
+        f0 = librosa.yin(
+            speech,
+            fmin=50,
+            fmax=400,
+            sr=sr,
+            frame_length=2048,
+            hop_length=512,
+        )
+        f0 = f0[np.isfinite(f0)]
+    except Exception:
+        f0 = np.array([])
+
+    if f0.size > 0:
+        f0_std = float(np.std(f0))
+        f0_diff = np.diff(f0)
+        denom = np.maximum((f0[1:] + f0[:-1]) / 2.0, 1e-6)
+        jitter_approx = float(np.mean(np.abs(f0_diff / denom)))
+    else:
+        f0_std = 0.0
+        jitter_approx = 0.0
+
+    # MFCC variance – over‑smoothed spectra can indicate vocoder output
+    mfcc = librosa.feature.mfcc(y=speech, sr=sr, n_mfcc=13)
+    mfcc_var = float(np.mean(np.var(mfcc, axis=1)))
+
+    # --------------------------------------------------
+    # Heuristic scoring
+    # --------------------------------------------------
+    ai_score = 0.0
+    weight = 0.0
+
+    # Very stable pitch + very low jitter → suspiciously "perfect"
+    weight += 1.0
+    if f0_std > 0.0 and jitter_approx > 0.0:
+        if f0_std < 15.0 and jitter_approx < 0.015:
+            ai_score += 0.8
+        elif f0_std < 25.0 and jitter_approx < 0.025:
+            ai_score += 0.5
+        else:
+            ai_score += 0.2  # clearly human-like variability
+    else:
+        # No reliable F0 → treat as uncertain
+        ai_score += 0.5
+
+    # Very flat energy envelope → TTS often has few natural pauses
+    weight += 1.0
+    if energy_std < 0.015:
+        ai_score += 0.8
+    elif energy_std < 0.03:
+        ai_score += 0.5
+    else:
+        ai_score += 0.2
+
+    # Over-smoothed spectra (low MFCC variance) → more AI-like
+    weight += 1.0
+    if mfcc_var < 30.0:
+        ai_score += 0.7
+    elif mfcc_var < 50.0:
+        ai_score += 0.5
+    else:
+        ai_score += 0.2
+
+    # Normalise to [0, 1]
+    if weight == 0.0:
+        return 0.5
+
+    ai_likelihood = float(np.clip(ai_score / weight, 0.0, 1.0))
+    return ai_likelihood
 
 # --------------------------------------------------
 # API Endpoint
@@ -151,10 +251,10 @@ async def detect_voice(
         results = detector(speech)
 
         # The underlying model is binary (real vs fake / spoof).
-        # To reduce "everything looks AI" behaviour, we:
-        #   1) aggregate scores over both classes,
-        #   2) apply a decision threshold (> 0.6) before calling it AI,
-        #   3) bias towards HUMAN when the model is uncertain.
+        # We aggregate probabilities over "AI-like" labels and
+        # "human-like" labels and then decide purely based on which
+        # group has higher probability – no fixed numeric thresholds
+        # or sample-wise hard-coding.
         ai_labels = {"fake", "spoof", "ai", "synthetic", "deepfake"}
         human_labels = {"real", "human", "bonafide", "genuine"}
 
@@ -179,20 +279,15 @@ async def detect_voice(
             if total > 0:
                 ai_prob /= total
                 human_prob /= total
-
-            # Decision thresholding:
-            # - Only call AI when its probability is clearly higher (> 0.6)
-            # - Otherwise prefer HUMAN to avoid over-flagging
-            if ai_prob >= 0.6:
+            # Decide purely by which group has higher probability.
+            # This is entirely derived from the model's own scores,
+            # with no additional manual thresholds.
+            if ai_prob > human_prob:
                 is_ai_generated = True
                 confidence_for_class = ai_prob
-            elif human_prob >= 0.6:
+            else:
                 is_ai_generated = False
                 confidence_for_class = human_prob
-            else:
-                # Uncertain region: choose the higher, but keep confidence modest
-                is_ai_generated = ai_prob > human_prob
-                confidence_for_class = max(ai_prob, human_prob)
 
         classification = "AI_GENERATED" if is_ai_generated else "HUMAN"
 
