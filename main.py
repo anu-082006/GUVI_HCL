@@ -154,25 +154,33 @@ async def detect_voice(
         top_result = results[0]
         label = top_result["label"].lower()
         confidence = float(top_result["score"])
-
+        
         # Handle different label naming conventions safely
         is_ai_generated = label in ["fake", "spoof", "ai", "synthetic"]
-
-        if is_ai_generated and confidence >= 0.60:
+        
+        # Signal-based calibration guard
+        energy_variance = np.var(speech)
+        
+        if energy_variance > 0.02 and confidence < 0.90:
+            classification = "HUMAN"
+        elif is_ai_generated and confidence >= 0.85:
             classification = "AI_GENERATED"
         else:
             classification = "HUMAN"
 
 
+
         # --------------------------------------------------
-        # 6. Construct Response
+        # 6. Explanation Logic (Confidence-Aware)
         # --------------------------------------------------
+
+
         if confidence > 0.75:
             explanation = (
                 "Unnatural spectral and temporal artifacts detected"
                 if classification == "AI_GENERATED"
                 else "Natural human vocal patterns observed"
-                    )
+            )
         elif confidence < 0.55:
             explanation = "Low confidence prediction due to ambiguous acoustic patterns"
         else:
@@ -182,11 +190,12 @@ async def detect_voice(
                 else "Likely human speech with some artificial characteristics"
             )
 
+
         return {
             "status": "success",
             "language": language,
             "classification": classification,
-            "confidenceScore": float(f"{confidence:.3f}"),
+            "confidenceScore": min(float(f"{confidence:.3f}"), 0.95),
             "explanation": explanation
         }
 
