@@ -168,11 +168,11 @@ async def detect_voice(
         # 6. Construct Response
         # --------------------------------------------------
         if confidence > 0.75:
-    explanation = (
-        "Unnatural spectral and temporal artifacts detected"
-        if classification == "AI_GENERATED"
-        else "Natural human vocal patterns observed"
-            )
+            explanation = (
+                "Unnatural spectral and temporal artifacts detected"
+                if classification == "AI_GENERATED"
+                else "Natural human vocal patterns observed"
+                    )
         elif confidence < 0.55:
             explanation = "Low confidence prediction due to ambiguous acoustic patterns"
         else:
