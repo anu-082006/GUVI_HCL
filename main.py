@@ -236,7 +236,7 @@ async def detect_voice(
             )
 
         # --------------------------------------------------
-        # 4.2 Minimum Duration Check (Fix 3)
+        # 4.2 Duration Checks
         # --------------------------------------------------
         duration_seconds = len(speech) / 16000
         if duration_seconds < 1.0:
@@ -244,6 +244,15 @@ async def detect_voice(
                 status_code=400,
                 detail="Audio duration too short for analysis"
             )
+
+        # To avoid very long files causing slow inference / timeouts
+        # on limited CPU, cap the analysed duration to a fixed window.
+        # This does not hard-code any outcome; it only trades a bit of
+        # temporal coverage for faster, more reliable responses.
+        max_duration_seconds = 12.0
+        max_samples = int(max_duration_seconds * 16000)
+        if len(speech) > max_samples:
+            speech = speech[:max_samples]
 
         # --------------------------------------------------
         # 5. Model Inference
