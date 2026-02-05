@@ -139,11 +139,12 @@ async def detect_voice(
         # 4.2 Minimum Duration Check (Fix 3)
         # --------------------------------------------------
         duration_seconds = len(speech) / 16000
-        if duration_seconds < 1.0:
+        if duration_seconds < 2.5:
             raise HTTPException(
                 status_code=400,
                 detail="Audio duration too short for analysis"
             )
+
 
         # --------------------------------------------------
         # 5. Model Inference
@@ -157,21 +158,36 @@ async def detect_voice(
         # Handle different label naming conventions safely
         is_ai_generated = label in ["fake", "spoof", "ai", "synthetic"]
 
-        classification = "AI_GENERATED" if is_ai_generated else "HUMAN"
+        if is_ai_generated and confidence >= 0.60:
+            classification = "AI_GENERATED"
+        else:
+            classification = "HUMAN"
+
 
         # --------------------------------------------------
         # 6. Construct Response
         # --------------------------------------------------
+        if confidence > 0.75:
+    explanation = (
+        "Unnatural spectral and temporal artifacts detected"
+        if classification == "AI_GENERATED"
+        else "Natural human vocal patterns observed"
+            )
+        elif confidence < 0.55:
+            explanation = "Low confidence prediction due to ambiguous acoustic patterns"
+        else:
+            explanation = (
+                "Likely synthetic speech patterns detected"
+                if classification == "AI_GENERATED"
+                else "Likely human speech with some artificial characteristics"
+            )
+
         return {
             "status": "success",
             "language": language,
             "classification": classification,
             "confidenceScore": float(f"{confidence:.3f}"),
-            "explanation": (
-                "Unnatural spectral and temporal artifacts detected"
-                if is_ai_generated
-                else "Natural human vocal patterns observed"
-            )
+            "explanation": explanation
         }
 
     except Exception as e:
